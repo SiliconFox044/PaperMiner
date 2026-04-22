@@ -1,0 +1,25 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c ':*)",
+      "Bash(python fix_doclib.py)",
+      "Bash(python d:/Code_Writing/TEST002/fix_drag.py)",
+      "Bash(python d:/Code_Writing/TEST002/fix_drag2.py)",
+      "Bash(npx tsc:*)",
+      "Bash(pnpm exec:*)",
+      "Bash(cat)",
+      "Bash(python /tmp/fix_upload.py)",
+      "Bash(python /tmp/fix_jsx.py)",
+      "Bash(python)",
+      "Bash(node -e \"const l = require\\('./node_modules/lucide-react'\\); console.log\\(Object.keys\\(l\\).filter\\(k => k.toLowerCase\\(\\).includes\\('more'\\)\\).join\\(', '\\)\\)\")",
+      "Bash(python -c \"import json; json.load\\(open\\('data/paper_registry.json', encoding='utf-8'\\)\\); print\\('JSON valid'\\)\")",
+      "Bash(python fix_json.py)",
+      "Bash(node --input-type=module)",
+      "Bash(node --input-type=module -e ':*)",
+      "Bash(python scripts/clean_orphan_chunks.py)",
+      "Bash(python scripts/reindex_all_papers.py)",
+      "Bash(ls -la .env*)",
+      "Bash(cat .env)"
+    ]
+  }
+}
