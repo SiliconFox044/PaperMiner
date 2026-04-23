@@ -12,6 +12,10 @@ from pathlib import Path
 from typing import Optional
 import uuid
 
+import shutil
+from Paper_RAG.pipeline import vector_store
+from Paper_RAG.registry.md5_records import remove_md5_by_paper_id
+
 from filelock import FileLock
 
 
@@ -445,3 +449,151 @@ def _compute_md5(file_path: str) -> str:
 def _iso_now() -> str:
     """返回当前 UTC 时间的 ISO 格式字符串。"""
     return datetime.utcnow().isoformat()
+
+
+# ── 论文删除 ────────────────────────────────────────────────────────────────
+
+
+DATA_DIR = Path(__file__).parent.parent.parent / "data"
+
+
+def delete_single_paper(paper_id: str, registry: dict) -> dict:
+    """删除单篇论文，含前置检查和后置验证。
+
+    执行顺序：Qdrant 向量 → 本地文件 → registry 更新
+    返回包含详细验证信息的结果字典。
+
+    结果字典键说明：
+        status:          "completed" | "partial" | "failed"
+        paper_id:        str
+        filename:        str
+        chunk_count:     int（来自 registry，为预期数量）
+        vectors_before:  int（删除前实际找到的向量数）
+        vectors_after:   int（删除后剩余的向量数）
+        local_deleted:   bool（本地文件夹是否已删除）
+        error_msg:       str | None
+        detail:          str（人类可读的操作摘要）
+    """
+    # ── 步骤 1：查询 registry ──────────────────────────────────────────
+    papers = registry.get("papers", registry)
+    info = papers.get(paper_id)
+    if info is None:
+        return {
+            "status": "failed",
+            "paper_id": paper_id,
+            "filename": "unknown",
+            "chunk_count": 0,
+            "vectors_before": 0,
+            "vectors_after": 0,
+            "local_deleted": False,
+            "error_msg": "paper_id not found in registry",
+            "detail": "✗ 删除失败：registry 中找不到该论文记录",
+        }
+
+    original_filename = info.get("original_filename", "unknown")
+    local_dir = info.get("local_dir", "")
+    chunk_count = info.get("chunk_count", 0)
+
+    # ── 步骤 2：前置检查 — 删除前统计向量数 ─────────────────────────
+    try:
+        vectors_before = vector_store.count_paper_vectors(
+            paper_id=paper_id,
+            data_dir=str(DATA_DIR)
+        )
+    except Exception:
+        vectors_before = -1  # -1 表示计数失败
+
+    # ── 步骤 3：删除 Qdrant 向量 ─────────────────────────────────────
+    try:
+        vector_store.delete_paper_vectors(
+            paper_id=paper_id,
+            data_dir=str(DATA_DIR)
+        )
+    except Exception as e:
+        return {
+            "status": "failed",
+            "paper_id": paper_id,
+            "filename": original_filename,
+            "chunk_count": chunk_count,
+            "vectors_before": vectors_before,
+            "vectors_after": vectors_before,
+            "local_deleted": False,
+            "error_msg": str(e),
+            "detail": f"✗ 删除失败：Qdrant 操作出错 — {e}",
+        }
+
+    # ── 步骤 4：后置检查 — 删除后统计向量数 ─────────────────────────
+    try:
+        vectors_after = vector_store.count_paper_vectors(
+            paper_id=paper_id,
+            data_dir=str(DATA_DIR)
+        )
+    except Exception:
+        vectors_after = -1
+
+    # ── 步骤 5：删除本地文件 ────────────────────────────────────────
+    local_deleted = False
+    if local_dir:
+        local_path = DATA_DIR / "papers" / paper_id
+        if local_path.exists():
+            shutil.rmtree(local_path, ignore_errors=True)
+            local_deleted = not local_path.exists()
+        else:
+            local_deleted = False  # 文件夹本来就不存在
+
+    # ── 步骤 5.5：清理 md5_records ─────────────────────────────────────
+    md5_ok, md5_msg = remove_md5_by_paper_id(paper_id)
+
+    # ── 步骤 6：更新 registry ───────────────────────────────────────────
+    delete_paper(registry, paper_id)
+    save_registry(registry)
+
+    # ── 步骤 7：构建包含 detail 字符串的结果 ───────────────────────────
+    # 判断向量删除结果
+    if vectors_before == 0:
+        vector_msg = "向量不存在（已跳过）"
+        vector_ok = True
+    elif vectors_before == -1:
+        vector_msg = "向量计数失败（无法验证）"
+        vector_ok = False
+    elif vectors_after == 0:
+        vector_msg = f"向量已清除（{vectors_before} 条）"
+        vector_ok = True
+    elif vectors_after > 0:
+        vector_msg = f"向量未完全清除（删除前 {vectors_before} 条，删除后仍剩 {vectors_after} 条）"
+        vector_ok = False
+    else:
+        vector_msg = f"向量已清除（{vectors_before} 条）"
+        vector_ok = True
+
+    # 判断本地文件结果
+    if not local_dir:
+        local_msg = "无本地文件记录（已跳过）"
+    elif local_deleted:
+        local_msg = "本地文件已删除"
+    else:
+        local_msg = "本地文件不存在（已跳过）"
+
+    # 判断整体状态
+    if vector_ok and md5_ok:
+        status = "completed"
+        prefix = "✓ 完整删除" if vectors_before > 0 else "⚠ 部分成功"
+    else:
+        status = "partial"
+        prefix = "⚠ 部分成功"
+
+    detail = f"{prefix}    {vector_msg}，{local_msg}，{md5_msg}，记录已更新"
+
+    return {
+        "status": status,
+        "paper_id": paper_id,
+        "filename": original_filename,
+        "chunk_count": chunk_count,
+        "vectors_before": vectors_before,
+        "vectors_after": vectors_after,
+        "local_deleted": local_deleted,
+        "md5_deleted": md5_ok,
+        "md5_msg": md5_msg,
+        "error_msg": None,
+        "detail": detail,
+    }

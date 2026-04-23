@@ -1,4 +1,4 @@
-﻿import React, { useState, useCallback, useEffect } from 'react';
+﻿import { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import ReactMarkdown from 'react-markdown';
 import { PanelLeftClose, PanelLeftOpen, Search, History, Filter } from 'lucide-react';
@@ -11,8 +11,6 @@ import {
   SelectValue,
 } from "./ui/select";
 import { DocumentSelectionModal } from './DocumentSelectionModal';
-
-interface OpinionSearchProps {}
 
 /** 历史记录快照：包含查询词、结果、分析结论、TopK、时间戳 */
 interface HistoryItem {
@@ -125,40 +123,10 @@ export function OpinionSearch() {
     setIsInputCollapsed(false);
   };
 
-  /** TopK 切换：向下兼容走前端 slice，向上补偿走网络重载 */
-  const handleTopKChange = useCallback(async (newTopK: number) => {
-    if (newTopK <= results.length) {
-      // 向下兼容：前端直接 slice，不发请求
-      setTopK(newTopK);
-    } else if (searchQuery.trim()) {
-      // 向上补偿：需要更多结果，发起网络重载（保留 selectedScope 筛选条件）
-      setIsLoading(true);
-      try {
-        const { results: retrievedResults, analysis: newAnalysis, analysis_sources: newSources } = await fetchRetrieve(
-          searchQuery,
-          newTopK,
-          selectedScope.length > 0 ? selectedScope : undefined
-        );
-        setResults(retrievedResults);
-        setAnalysis(newAnalysis);
-        setAnalysisSources(newSources);
-        // 静默更新缓存中当前历史记录的 results、analysis、analysis_sources 和 topK
-        if (currentHistoryId) {
-          const updated = history.map((h: HistoryItem) =>
-            h.id === currentHistoryId
-              ? { ...h, results: retrievedResults, analysis: newAnalysis, analysis_sources: newSources, topK: newTopK }
-              : h
-          );
-          persistHistory(updated);
-        }
-        setTopK(newTopK);
-      } catch (err) {
-        setError(err instanceof Error ? err.message : "检索失败，请重试");
-      } finally {
-        setIsLoading(false);
-      }
-    }
-  }, [results.length, searchQuery, selectedScope, currentHistoryId]);
+    /** TopK 切换：仅更新状态，不触发检索 */
+  const handleTopKChange = (newTopK: number) => {
+    setTopK(newTopK);
+  };
 
   const handleDeleteHistory = (id: string) => {
     const newHistory = history.filter((h: HistoryItem) => h.id !== id);
@@ -305,6 +273,7 @@ export function OpinionSearch() {
                   exit={{ opacity: 0, height: 0 }}
                   transition={{ duration: 0.3, ease: 'easeInOut' }}
                   className="flex justify-between items-end mt-4 overflow-hidden shrink-0"
+                  onClick={(e) => e.stopPropagation()}
                 >
                   {/* 来源选择器（左下角）*/}
                   <button

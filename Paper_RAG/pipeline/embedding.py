@@ -146,43 +146,6 @@ def embed_documents_batch(
     return all_embeddings
 
 
-def get_failed_batches(data_dir: str = "./data") -> List[dict]:
-    """从 failed_batches.jsonl 读取之前失败的批次记录。
-
-    Args:
-        data_dir: 包含 failed_batches.jsonl 的数据目录
-
-    Returns:
-        失败批次记录列表
-    """
-    failed_batches_path = os.path.join(data_dir, "failed_batches.jsonl")
-    if not os.path.exists(failed_batches_path):
-        return []
-
-    failed_batches = []
-    with open(failed_batches_path, "r", encoding="utf-8") as f:
-        for line in f:
-            if line.strip():
-                failed_batches.append(json.loads(line))
-    return failed_batches
-
-
-def is_batch_failed(pdf_path: str, batch_index: int, data_dir: str = "./data") -> bool:
-    """检查指定批次是否曾失败过。
-
-    Args:
-        pdf_path: PDF 文件路径
-        batch_index: 批次索引
-        data_dir: 数据目录
-
-    Returns:
-        若批次被标记为失败则返回 True
-    """
-    failed_batches = get_failed_batches(data_dir)
-    return any(
-        fb["pdf_path"] == pdf_path and fb["batch_index"] == batch_index
-        for fb in failed_batches
-    )
 
 
 def compute_md5(file_path: str) -> str:

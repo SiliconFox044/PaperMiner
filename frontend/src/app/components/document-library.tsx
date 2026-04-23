@@ -465,10 +465,9 @@ export function DocumentLibrary({
   useEffect(() => {
     loadDocuments();
     return () => {
-      if (pollingIntervalRef.current) {
-        clearInterval(pollingIntervalRef.current);
-        pollingIntervalRef.current = null;
-      }
+      // 组件卸载时清理所有正在进行的轮询
+      pollingIntervalsRef.current.forEach((intervalId) => clearInterval(intervalId));
+      pollingIntervalsRef.current.clear();
     };
   }, []);
 
@@ -502,7 +501,7 @@ export function DocumentLibrary({
   }, [selectedFolderId, allDocuments]);
 
   // ── 轮询清理 ref ────────────────────────────────────────────────────────────
-  const pollingIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const pollingIntervalsRef = useRef<Map<string, ReturnType<typeof setInterval>>>(new Map());
 
   // 上传处理器
   const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -530,43 +529,66 @@ export function DocumentLibrary({
           setDocuments((prev) => [...prev, processingDoc]);
         }
 
-        // 开始轮询 — 先清除已有的轮询
-        if (pollingIntervalRef.current) {
-          clearInterval(pollingIntervalRef.current);
+        // 为每个文件单独管理一个轮询，互不干扰
+        // 如果该文件已有轮询在跑（重试场景），先清除
+        const existingInterval = pollingIntervalsRef.current.get(result.paper_id);
+        if (existingInterval !== undefined) {
+          clearInterval(existingInterval);
+          pollingIntervalsRef.current.delete(result.paper_id);
         }
-        // 通过 interval ref 管理，方便干净地停止
-        pollingIntervalRef.current = window.setInterval(async () => {
-          // 内联轮询逻辑，可干净停止
-          let attempts = 0;
-          const maxAttempts = 60;
-          const checkStatus = async (): Promise<void> => {
-            if (attempts >= maxAttempts) {
-              clearInterval(pollingIntervalRef.current!);
-              pollingIntervalRef.current = null;
-              return;
-            }
-            attempts++;
-            try {
-              const data = await fetchDocuments();
-              const doc = data.documents.find((d) => d.id === result.paper_id);
-              if (doc) {
-                const finalStatus = doc.status === "ready" ? "ready" : doc.status === "failed" ? "failed" : doc.status;
-                setAllDocuments((prev) =>
-                  prev.map((d) => d.id === result.paper_id ? { ...d, status: finalStatus } : d)
-                );
-                setDocuments((prev) =>
-                  prev.map((d) => d.id === result.paper_id ? { ...d, status: finalStatus } : d)
-                );
-                if (doc.status === "ready" || doc.status === "failed") {
-                  clearInterval(pollingIntervalRef.current!);
-                  pollingIntervalRef.current = null;
-                  return;
-                }
+
+        // attempts 提升到 setInterval 外部，确保跨 interval 累计计数
+        let attempts = 0;
+        const maxAttempts = 60; // 最多轮询 60 次（3 分钟）
+
+        const intervalId = window.setInterval(async () => {
+          // 超时兜底：无论后端状态如何，超过上限即停止
+          if (attempts >= maxAttempts) {
+            clearInterval(intervalId);
+            pollingIntervalsRef.current.delete(result.paper_id);
+            // 将超时文档标记为失败，避免界面永远转圈
+            setAllDocuments((prev) =>
+              prev.map((d) => d.id === result.paper_id && d.status === "processing" ? { ...d, status: "failed" } : d)
+            );
+            setDocuments((prev) =>
+              prev.map((d) => d.id === result.paper_id && d.status === "processing" ? { ...d, status: "failed" } : d)
+            );
+            return;
+          }
+          attempts++;
+
+          try {
+            const data = await fetchDocuments();
+            const doc = data.documents.find((d) => d.id === result.paper_id);
+
+            if (doc) {
+              // 同步最新状态到界面
+              setAllDocuments((prev) =>
+                prev.map((d) => d.id === result.paper_id ? { ...d, status: doc.status } : d)
+              );
+              setDocuments((prev) =>
+                prev.map((d) => d.id === result.paper_id ? { ...d, status: doc.status } : d)
+              );
+              // 到达终态（成功或失败）时停止该文件的轮询
+              if (doc.status === "ready" || doc.status === "failed") {
+                clearInterval(intervalId);
+                pollingIntervalsRef.current.delete(result.paper_id);
               }
-            } catch { /* 继续轮询 */ }
-          };
-          await checkStatus();
+            } else {
+              // 后端找不到该文档（异常情况），停止轮询并标记失败
+              clearInterval(intervalId);
+              pollingIntervalsRef.current.delete(result.paper_id);
+              setAllDocuments((prev) =>
+                prev.map((d) => d.id === result.paper_id ? { ...d, status: "failed" } : d)
+              );
+              setDocuments((prev) =>
+                prev.map((d) => d.id === result.paper_id ? { ...d, status: "failed" } : d)
+              );
+            }
+          } catch { /* 网络抖动，继续下一次轮询 */ }
         }, 3000);
+
+        pollingIntervalsRef.current.set(result.paper_id, intervalId);
       }
     } catch (err) {
       setUploadStatus(`上传失败：${err instanceof Error ? err.message : "未知错误"}`);

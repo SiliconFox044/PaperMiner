@@ -35,7 +35,7 @@
                              │ HTTP REST + SSE
                              ▼
 ┌──────────────────────────────────────────────────────────┐
-│  后端 (FastAPI, port 8001)                               │
+│  后端 (FastAPI, port 8000)                               │
 │  ├─ /api/retrieve  ─── 观点搜索                           │
 │  ├─ /api/answer    ─── 知识问答                           │
 │  ├─ /api/upload   ─── PDF 上传与异步处理                   │
@@ -66,7 +66,7 @@ TEST002/
 ├── Paper_RAG/                   # RAG 核心库
 │   ├── core/
 │   │   ├── main.py              # PDF 处理流程编排
-│   │   └── batch_processor.py   # 批量处理
+│   │   └── batch_processor.py   # 已废弃，功能合并至 paper_registry
 │   ├── pipeline/
 │   │   ├── pdf_parser.py        # MinerU PDF 解析
 │   │   ├── text_cleaner.py      # Markdown 清洗
@@ -113,8 +113,17 @@ TEST002/
 
 已要求Deepseek严格参考文献片段回答，最大化降低幻觉。如果文献库中不包含相关信息，Deepseek会直接说明缺乏参考信息。
 
+## 功能边界（暨下一步更新方向）
+1.暂时只支持对**中文法学论文**的识别。**中文著作、网络报刊文章、学位论文、英文论文**未进行识别及chunk切分优化，效果无法保证。日后会考虑优化识别路由，增设不同格式文章的识别&chunk切分算法。
+2.暂不支持对**公式、图片、表格**等内容的识别。请尽量避免上传富含表格的文献，以免污染chunk库。
+3.暂时只支持识别**PDF格式**的论文。Word/TXT等格式无法识别。
+4.模块二和模块三**可以跨模块进行单线程查询**（也即，你可以在模块二输入论点搜索之后，切换到模块三提问问题），但是，模块二和模块三现在**暂不支持并发查询**（你无法在发送一个检索或提问请求之后，通过新建检索或新建问答来继续检索或进行提问。）
+
+
+
 
 ## 快速开始
+(本项目所有操作均在Visual Studio Code中完成，推荐先进行安装。以便在终端中执行以下安装命令)
 
 ### 环境要求
 
@@ -131,10 +140,10 @@ pip install -r requirements.txt
 在Paper_RAG/config/.env中填写对应的api key
 ```bash
 1.DEEPSEEK_API_KEY=
-模块二论证支持度分析 & 模块三知识问答 依赖，1块够用几十次。
+#为模块二“论证支持度分析”和模块三“知识问答”提供LLM接入。物美价廉，单次检索成本约¥0.01.
 
 2.ZHIPU_API_KEY=
-Embedding依赖，新人注册有免费token
+#调用Embedding-3模型，新人注册有免费token，足够新建基础规模文献库
 
 3.SILICONFLOW_API_KEY=
 #Rerank重排环节依赖，免费
@@ -147,8 +156,6 @@ Embedding依赖，新人注册有免费token
 #### 启动后端（端口 8000）
 ```bash
 python server.py 
-#或者直接输入以下命令：
-uvicorn server:app --reload --port 8000
 ```
 
 #### 启动前端（端口 5173）

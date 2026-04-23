@@ -30,7 +30,6 @@ load_dotenv(os.path.join(os.path.dirname(__file__), "Paper_RAG", "config", ".env
 
 # ── FastAPI 框架────────────────────────────────────────────────────────────────
 from fastapi import FastAPI, HTTPException, Query, UploadFile, File, Body
-from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -45,13 +44,13 @@ from Paper_RAG.registry.paper_registry import (
     delete_folder,
     move_paper_to_folder,
     update_paper_status,
+    delete_single_paper,
 )
 from Paper_RAG.pipeline.vector_store import get_vector_store, add_chunks_to_vector_store
 from Paper_RAG.pipeline.pdf_parser import parse_pdf
 from Paper_RAG.pipeline.text_cleaner import clean_markdown
 from Paper_RAG.pipeline.chunk_splitter import split_chunks
 from Paper_RAG.pipeline.embedding import embed_documents_batch, compute_md5
-from Paper_RAG.core.batch_processor import collect_pdfs, delete_single_paper
 from Paper_RAG.utils.progress import progress_log
 
 # ── 项目路径常量────────────────────────────────────────────────────────────────
@@ -215,7 +214,6 @@ def save_qa_current(body: dict = Body(...)):
 # ── 全局单例初始化──────────────────────────────────────────────────────────────
 _searcher = None
 _qa_chain = None
-_qa_chain_stream = None
 
 
 def get_searcher():
@@ -237,15 +235,6 @@ def get_qa_chain():
         from Paper_RAG.generation.generation import create_qa_chain
         _qa_chain = create_qa_chain()
     return _qa_chain
-
-
-def get_qa_chain_stream():
-    """返回流式 QA 生成链全局单例，延迟初始化。"""
-    global _qa_chain_stream
-    if _qa_chain_stream is None:
-        from Paper_RAG.generation.generation import create_qa_chain_stream
-        _qa_chain_stream = create_qa_chain_stream()
-    return _qa_chain_stream
 
 
 # ── Pydantic 请求/响应模型──────────────────────────────────────────────────────
@@ -407,7 +396,8 @@ async def retrieve(request: RetrieveRequest):
         try:
             docs = searcher.retrieve_and_rerank(
                 request.query,
-                request.paper_ids if request.paper_ids else None
+                request.paper_ids if request.paper_ids else None,
+                rerank_top_n=request.top_k
             )
         except Exception as rerank_err:
             used_fallback = True
@@ -645,81 +635,6 @@ async def answer(request: AnswerRequest):
              elapsed_ms=total_elapsed, error_type=type(e).__name__,
              error_msg=_exc_summary(e))
         raise HTTPException(status_code=500, detail=f"生成失败: {str(e)}")
-
-
-@app.post("/api/answer/stream")
-async def answer_stream(request: AnswerRequest):
-    """知识问答流式接口：逐 token 推送生成内容，最后推送 sources。
-
-    响应格式为 text/event-stream（SSE）：
-      data: {"type": "token", "content": "..."}   ← 每个 token
-      data: {"type": "sources", "sources": [...]}  ← 生成结束后推送 sources
-      data: {"type": "done"}                       ← 结束标志
-    """
-    if not request.question.strip():
-        raise HTTPException(status_code=422, detail="question 不能为空")
-
-    async def generate():
-        yield f"data: {json.dumps({'type': 'ping'})}\n\n"
-        try:
-            searcher = get_searcher()
-
-            # ── 检索文档（与原接口逻辑一致）────────────────────────────
-            if not request.paper_ids:
-                try:
-                    docs = searcher.retrieve_and_rerank(request.question)
-                except Exception as rerank_err:
-                    logger.warning(f"Reranker 失败，降级: {rerank_err}")
-                    docs = searcher.get_retriever().invoke(request.question)
-            else:
-                try:
-                    docs = searcher.retrieve_and_rerank(request.question, request.paper_ids)
-                except Exception as rerank_err:
-                    logger.warning(f"Reranker 失败，降级: {rerank_err}")
-                    all_docs = searcher.get_retriever().invoke(request.question)
-                    docs = [
-                        doc for doc in all_docs
-                        if doc.metadata.get("paper_id") in request.paper_ids
-                        or doc.metadata.get("metadata.paper_id") in request.paper_ids
-                    ]
-
-            if not docs:
-                yield f"data: {json.dumps({'type': 'token', 'content': '当前文献库中缺乏回答该问题的相关内容。'}, ensure_ascii=False)}\n\n"
-                yield f"data: {json.dumps({'type': 'sources', 'sources': []}, ensure_ascii=False)}\n\n"
-                yield f"data: {json.dumps({'type': 'done'})}\n\n"
-                return
-
-            # ── 流式生成 ────────────────────────────────────────────────
-            chain = get_qa_chain_stream()
-            full_response = ""
-
-            for token in chain.stream({"documents": docs, "question": request.question}):
-                full_response += token
-                yield f"data: {json.dumps({'type': 'token', 'content': token}, ensure_ascii=False)}\n\n"
-
-            # ── 解析 sources，生成结束后推送 ────────────────────────────
-            sources = []
-            try:
-                parsed = json.loads(full_response)
-                answer_text = parsed.get("answer", "")
-                raw_sources = parsed.get("sources", [])
-                sources = [
-                    {"file": s.get("file", ""), "path": s.get("path", ""), "excerpt": s.get("excerpt", "")}
-                    for s in raw_sources
-                ]
-                # 补发一个 answer 替换 token 流（因为 token 流包含 JSON 外壳）
-                yield f"data: {json.dumps({'type': 'answer', 'content': answer_text}, ensure_ascii=False)}\n\n"
-            except json.JSONDecodeError:
-                pass
-
-            yield f"data: {json.dumps({'type': 'sources', 'sources': sources}, ensure_ascii=False)}\n\n"
-            yield f"data: {json.dumps({'type': 'done'})}\n\n"
-
-        except Exception as e:
-            logger.exception(f"[/api/answer/stream] 流式生成异常: {e}")
-            yield f"data: {json.dumps({'type': 'error', 'content': str(e)}, ensure_ascii=False)}\n\n"
-
-    return StreamingResponse(generate(), media_type="text/event-stream")
 
 
 # ── 文档库接口 ────────────────────────────────────────────────────────────────

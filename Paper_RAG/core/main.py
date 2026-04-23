@@ -21,7 +21,6 @@ from Paper_RAG.registry.md5_records import load_md5_records, save_md5_records
 from Paper_RAG.pipeline.vector_store import get_vector_store, add_chunks_to_vector_store, COLLECTION_NAME
 from Paper_RAG.retrieval.retrieval import get_retriever
 from Paper_RAG.generation.generation import create_generation_chain, _extract_json
-from Paper_RAG.core.batch_processor import collect_pdfs, batch_process
 from Paper_RAG.registry.paper_registry import load_registry
 from Paper_RAG.utils.inspector import (
     logger, save_checkpoint, inspect_parsed, inspect_cleaned,
@@ -94,7 +93,7 @@ def process_pdf_pipeline(pdf_path: str, file_name: str, should_abort: callable =
             chunk.metadata["source_file"] = file_name
             chunk.metadata["chunk_index"] = i
 
-        # Step 4.5: Save chunks to local file（与 batch_processor.py 格式一致）
+        # Step 4.5: Save chunks to local file（与旧 batch_processor 格式一致）
         if should_abort and should_abort():
             raise PipelineAbortedError(f"[{paper_id}] chunks 写入前检测到删除请求，已停止")
         local_dir = os.path.join(DATA_DIR, "papers", paper_id)

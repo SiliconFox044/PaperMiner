@@ -192,20 +192,6 @@ def create_qa_chain():
     return chain
 
 
-def generate_answer(chain, documents: List[Document], question: str) -> str:
-    """使用生成链生成结构化分析结果。
-
-    Args:
-        chain: 生成链
-        documents: 作为上下文的检索文档
-        question: 用户问题或待分析观点
-
-    Returns:
-        结构化分析结果
-    """
-    return chain.invoke({"documents": documents, "question": question})
-
-
 def _extract_json(text: str) -> str:
     """从 LLM 输出中提取第一个完整 JSON 对象"""
     if not text or not text.strip():
@@ -219,33 +205,3 @@ def _extract_json(text: str) -> str:
     if match:
         return match.group(0)
     return '{"answer": null, "sources": []}'
-
-
-def create_qa_chain_stream():
-    """知识问答流式生成链，返回 token 流。"""
-    api_key = os.getenv("DEEPSEEK_API_KEY")
-    if not api_key:
-        raise ValueError("DEEPSEEK_API_KEY environment variable is not set")
-
-    llm = ChatOpenAI(
-        model="deepseek-reasoner",
-        api_key=api_key,
-        base_url="https://api.deepseek.com",
-        temperature=0.3,
-        streaming=True
-    )
-
-    prompt = PromptTemplate.from_template(QA_PROMPT)
-
-    chain = (
-        RunnablePassthrough()
-        | {
-            "query": RunnablePassthrough(),
-            "context": lambda x: format_documents(x["documents"])
-        }
-        | prompt
-        | llm
-        | StrOutputParser()
-    )
-
-    return chain

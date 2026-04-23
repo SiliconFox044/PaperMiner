@@ -135,13 +135,15 @@ class VectorSearchWithReranker:
     def retrieve_and_rerank(
         self,
         query: str,
-        paper_ids: Optional[list[str]] = None
+        paper_ids: Optional[list[str]] = None,
+        rerank_top_n: Optional[int] = None
     ) -> List[Document]:
         """执行向量检索 + SiliconFlow rerank，返回 top-N 文档。
 
         Args:
             query: 用户查询文本
             paper_ids: 可选，要限制检索的 paper_id 列表
+            rerank_top_n: 可选，覆盖默认的 reranker 返回数量（self.reranker_top_n）
 
         Returns:
             经过 rerank 的 top-N Document 列表
@@ -177,11 +179,12 @@ class VectorSearchWithReranker:
         if not docs:
             return []
 
+        effective_top_n = rerank_top_n if rerank_top_n is not None else self.reranker_top_n
         t_rerank = time.perf_counter()
         logger(module="retrieval", api="retrieve_and_rerank", stage="rerank_start",
-               status="start", elapsed_ms=0, reranker_top_n=self.reranker_top_n)
+               status="start", elapsed_ms=0, reranker_top_n=effective_top_n)
 
-        top_docs = _siliconflow_rerank(query, docs, self.reranker_top_n)
+        top_docs = _siliconflow_rerank(query, docs, effective_top_n)
 
         rerank_elapsed = round((time.perf_counter() - t_rerank) * 1000, 2)
         logger(module="retrieval", api="retrieve_and_rerank", stage="rerank_done",
