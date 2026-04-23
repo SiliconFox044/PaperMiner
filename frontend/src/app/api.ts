@@ -280,6 +280,36 @@ export async function deleteDocument(paperId: string): Promise<DeleteDocumentRes
 }
 
 /**
+ * DELETE /api/documents/batch
+ * 批量删除文档，返回成功与失败列表
+ */
+export interface BatchDeleteResponse {
+  deleted: string[];
+  failed: { paper_id: string; reason: string }[];
+}
+
+export async function batchDeleteDocuments(paperIds: string[]): Promise<BatchDeleteResponse> {
+  const res = await fetch(`${BASE_URL}/api/documents/batch`, {
+    method: "DELETE",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ paper_ids: paperIds }),
+  });
+  if (!res.ok) {
+    let message = `HTTP ${res.status}`;
+    try {
+      const json = await res.json();
+      if (json && typeof json === "object" && "detail" in json) {
+        message = (json as { detail: string }).detail;
+      }
+    } catch {
+      // 使用状态文本作为回退
+    }
+    throw new Error(message);
+  }
+  return res.json() as Promise<BatchDeleteResponse>;
+}
+
+/**
  * POST /api/documents/{paper_id}/retry
  * 重试失败的文档处理
  */

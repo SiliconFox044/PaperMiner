@@ -12,7 +12,6 @@ import {
   Pencil,
   Trash2,
   FolderPlus,
-  Clock,
   XCircle,
 } from "lucide-react";
 import {
@@ -23,6 +22,7 @@ import {
   deleteFolder,
   movePaperToFolder,
   deleteDocument,
+  batchDeleteDocuments,
   retryDocument,
   type FolderNode as ApiFolderNode,
   type DocumentRecord,
@@ -51,14 +51,22 @@ interface FolderNodeInternal extends ApiFolderNode {
 
 // ─── 状态图标组件 ─────────────────────────────────────────────────────────────
 
-function StatusIcon({ status, onRetry }: { status: string; onRetry?: () => void }) {
+function StatusIcon({
+  status,
+  onRetry,
+  onRetryDelete,
+}: {
+  status: string;
+  onRetry?: () => void;
+  onRetryDelete?: () => void;
+}) {
   if (status === "processing" || status === "deleting") {
     return <Loader2 className="w-4 h-4 text-muted-foreground animate-spin" />;
   }
   if (status === "ready") {
     return <CheckCircle2 className="w-4 h-4 text-green-500" />;
   }
-  if (status === "failed" || status === "delete_failed") {
+  if (status === "failed") {
     return (
       <TooltipProvider>
         <Tooltip>
@@ -68,13 +76,27 @@ function StatusIcon({ status, onRetry }: { status: string; onRetry?: () => void 
               onClick={onRetry}
             />
           </TooltipTrigger>
-          <TooltipContent>点击重试</TooltipContent>
+          <TooltipContent>点击重试解析</TooltipContent>
         </Tooltip>
       </TooltipProvider>
     );
   }
-  // 等待中
-  return <Clock className="w-4 h-4 text-gray-400" />;
+  if (status === "delete_failed") {
+    return (
+      <TooltipProvider>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <XCircle
+              className="w-4 h-4 text-orange-500 cursor-pointer"
+              onClick={onRetryDelete}
+            />
+          </TooltipTrigger>
+          <TooltipContent>点击重试删除</TooltipContent>
+        </Tooltip>
+      </TooltipProvider>
+    );
+  }
+  return null;
 }
 
 function StatusText({ status }: { status: string }) {
@@ -503,6 +525,61 @@ export function DocumentLibrary({
   // ── 轮询清理 ref ────────────────────────────────────────────────────────────
   const pollingIntervalsRef = useRef<Map<string, ReturnType<typeof setInterval>>>(new Map());
 
+  // ── 通用轮询函数 ────────────────────────────────────────────────────────────
+  const startPolling = (paperId: string) => {
+    const existingInterval = pollingIntervalsRef.current.get(paperId);
+    if (existingInterval !== undefined) {
+      clearInterval(existingInterval);
+      pollingIntervalsRef.current.delete(paperId);
+    }
+
+    let attempts = 0;
+    const maxAttempts = 25;
+
+    const intervalId = window.setInterval(async () => {
+      if (attempts >= maxAttempts) {
+        clearInterval(intervalId);
+        pollingIntervalsRef.current.delete(paperId);
+        setAllDocuments((prev) =>
+          prev.map((d) => d.id === paperId && d.status === "processing" ? { ...d, status: "failed" as const } : d)
+        );
+        setDocuments((prev) =>
+          prev.map((d) => d.id === paperId && d.status === "processing" ? { ...d, status: "failed" as const } : d)
+        );
+        return;
+      }
+      attempts++;
+
+      try {
+        const data = await fetchDocuments();
+        const doc = data.documents.find((d) => d.id === paperId);
+        if (doc) {
+          setAllDocuments((prev) =>
+            prev.map((d) => d.id === paperId ? { ...d, status: doc.status } : d)
+          );
+          setDocuments((prev) =>
+            prev.map((d) => d.id === paperId ? { ...d, status: doc.status } : d)
+          );
+          if (doc.status === "ready" || doc.status === "failed") {
+            clearInterval(intervalId);
+            pollingIntervalsRef.current.delete(paperId);
+          }
+        } else {
+          clearInterval(intervalId);
+          pollingIntervalsRef.current.delete(paperId);
+          setAllDocuments((prev) =>
+            prev.map((d) => d.id === paperId ? { ...d, status: "failed" as const } : d)
+          );
+          setDocuments((prev) =>
+            prev.map((d) => d.id === paperId ? { ...d, status: "failed" as const } : d)
+          );
+        }
+      } catch { /* 网络抖动，继续下一次轮询 */ }
+    }, 8000);
+
+    pollingIntervalsRef.current.set(paperId, intervalId);
+  };
+
   // 上传处理器
   const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
@@ -531,64 +608,7 @@ export function DocumentLibrary({
 
         // 为每个文件单独管理一个轮询，互不干扰
         // 如果该文件已有轮询在跑（重试场景），先清除
-        const existingInterval = pollingIntervalsRef.current.get(result.paper_id);
-        if (existingInterval !== undefined) {
-          clearInterval(existingInterval);
-          pollingIntervalsRef.current.delete(result.paper_id);
-        }
-
-        // attempts 提升到 setInterval 外部，确保跨 interval 累计计数
-        let attempts = 0;
-        const maxAttempts = 25; // 最多轮询 25 次（1 分钟）
-
-        const intervalId = window.setInterval(async () => {
-          // 超时兜底：无论后端状态如何，超过上限即停止
-          if (attempts >= maxAttempts) {
-            clearInterval(intervalId);
-            pollingIntervalsRef.current.delete(result.paper_id);
-            // 将超时文档标记为失败，避免界面永远转圈
-            setAllDocuments((prev) =>
-              prev.map((d) => d.id === result.paper_id && d.status === "processing" ? { ...d, status: "failed" } : d)
-            );
-            setDocuments((prev) =>
-              prev.map((d) => d.id === result.paper_id && d.status === "processing" ? { ...d, status: "failed" } : d)
-            );
-            return;
-          }
-          attempts++;
-
-          try {
-            const data = await fetchDocuments();
-            const doc = data.documents.find((d) => d.id === result.paper_id);
-
-            if (doc) {
-              // 同步最新状态到界面
-              setAllDocuments((prev) =>
-                prev.map((d) => d.id === result.paper_id ? { ...d, status: doc.status } : d)
-              );
-              setDocuments((prev) =>
-                prev.map((d) => d.id === result.paper_id ? { ...d, status: doc.status } : d)
-              );
-              // 到达终态（成功或失败）时停止该文件的轮询
-              if (doc.status === "ready" || doc.status === "failed") {
-                clearInterval(intervalId);
-                pollingIntervalsRef.current.delete(result.paper_id);
-              }
-            } else {
-              // 后端找不到该文档（异常情况），停止轮询并标记失败
-              clearInterval(intervalId);
-              pollingIntervalsRef.current.delete(result.paper_id);
-              setAllDocuments((prev) =>
-                prev.map((d) => d.id === result.paper_id ? { ...d, status: "failed" } : d)
-              );
-              setDocuments((prev) =>
-                prev.map((d) => d.id === result.paper_id ? { ...d, status: "failed" } : d)
-              );
-            }
-          } catch { /* 网络抖动，继续下一次轮询 */ }
-        }, 8000);
-
-        pollingIntervalsRef.current.set(result.paper_id, intervalId);
+        startPolling(result.paper_id);
       }
     } catch (err) {
       setUploadStatus(`上传失败：${err instanceof Error ? err.message : "未知错误"}`);
@@ -685,14 +705,40 @@ export function DocumentLibrary({
   // 批量删除
   const handleBatchDelete = async () => {
     const ids = Array.from(selectedDocIds);
-    for (const id of ids) {
-      await deleteDocument(id);
+    if (ids.length === 0) return;
+
+    try {
+      const result = await batchDeleteDocuments(ids);
+
+      // 仅移除成功删除的条目
+      if (result.deleted.length > 0) {
+        setAllDocuments((prev) => prev.filter((d) => !result.deleted.includes(d.id)));
+        setDocuments((prev) => prev.filter((d) => !result.deleted.includes(d.id)));
+      }
+
+      // 失败条目标记为 delete_failed，保留在列表中
+      if (result.failed.length > 0) {
+        const failedIds = new Set(result.failed.map((f) => f.paper_id));
+        setAllDocuments((prev) =>
+          prev.map((d) => failedIds.has(d.id) ? { ...d, status: "delete_failed" as const } : d)
+        );
+        setDocuments((prev) =>
+          prev.map((d) => failedIds.has(d.id) ? { ...d, status: "delete_failed" as const } : d)
+        );
+        setError(`删除完成：成功 ${result.deleted.length} 条，失败 ${result.failed.length} 条`);
+      }
+
+      // 清除已成功删除条目的选中状态，失败条目保留选中
+      setSelectedDocIds((prev) => {
+        const next = new Set(prev);
+        result.deleted.forEach((id) => next.delete(id));
+        return next;
+      });
+
+      onFolderTreeChange();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "批量删除失败");
     }
-    // 即时从 UI 移除已删除的文档
-    setAllDocuments((prev) => prev.filter((d) => !ids.includes(d.id)));
-    setDocuments((prev) => prev.filter((d) => !ids.includes(d.id)));
-    setSelectedDocIds(new Set());
-    onFolderTreeChange();
   };
 
   // 文档删除 — 先确认再移除的模式
@@ -739,7 +785,6 @@ export function DocumentLibrary({
   };
 
   const handleRetry = async (paperId: string) => {
-    // 乐观更新：立刻把该条目状态改为 processing
     setAllDocuments((prev: DocumentRecord[]) =>
       prev.map((d: DocumentRecord) => d.id === paperId ? { ...d, status: "processing" as const } : d)
     );
@@ -748,8 +793,8 @@ export function DocumentLibrary({
     );
     try {
       await retryDocument(paperId);
+      startPolling(paperId);
     } catch (err) {
-      // 回滚状态
       setAllDocuments((prev: DocumentRecord[]) =>
         prev.map((d: DocumentRecord) => d.id === paperId ? { ...d, status: "failed" as const } : d)
       );
@@ -763,7 +808,36 @@ export function DocumentLibrary({
         setError(msg);
       }
     }
-    // 成功后不需要额外操作，现有轮询机制会自动更新状态
+  };
+
+  const handleRetryDelete = async (paperId: string) => {
+    if (deletingIds.has(paperId)) return;
+
+    setDeletingIds((prev) => new Set([...prev, paperId]));
+    setAllDocuments((prev) =>
+      prev.map((d) => d.id === paperId ? { ...d, status: "deleting" as const } : d)
+    );
+    setDocuments((prev) =>
+      prev.map((d) => d.id === paperId ? { ...d, status: "deleting" as const } : d)
+    );
+
+    try {
+      await deleteDocument(paperId);
+      setAllDocuments((prev) => prev.filter((d) => d.id !== paperId));
+      setDocuments((prev) => prev.filter((d) => d.id !== paperId));
+      onFolderTreeChange();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "删除失败";
+      setAllDocuments((prev) =>
+        prev.map((d) => d.id === paperId ? { ...d, status: "delete_failed" as const } : d)
+      );
+      setDocuments((prev) =>
+        prev.map((d) => d.id === paperId ? { ...d, status: "delete_failed" as const } : d)
+      );
+      setError(msg);
+    } finally {
+      setDeletingIds((prev) => { const next = new Set(prev); next.delete(paperId); return next; });
+    }
   };
 
   // 拖拽功能
@@ -1089,7 +1163,7 @@ export function DocumentLibrary({
                         {doc.addedDate}
                       </span>
                       <div className="w-5 flex items-center justify-center">
-                        <StatusIcon status={doc.status} onRetry={() => handleRetry(doc.id)} />
+                        <StatusIcon status={doc.status} onRetry={() => handleRetry(doc.id)} onRetryDelete={() => handleRetryDelete(doc.id)} />
                       </div>
                     </div>
                   </div>
