@@ -152,7 +152,7 @@ def create_generation_chain():
     chain = (
         RunnablePassthrough()
         | {
-            "query": RunnablePassthrough(),
+            "query": lambda x: x["question"],
             "context": lambda x: format_documents(x["documents"])
         }
         | prompt
@@ -181,7 +181,7 @@ def create_qa_chain():
     chain = (
         RunnablePassthrough()
         | {
-            "query": RunnablePassthrough(),
+            "query": lambda x: x["question"],
             "context": lambda x: format_documents(x["documents"])
         }
         | prompt

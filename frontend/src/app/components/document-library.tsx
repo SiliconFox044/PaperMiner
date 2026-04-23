@@ -456,7 +456,7 @@ export function DocumentLibrary({
     setToasts((prev: Array<{ id: string; message: string }>) => [...prev, { id, message }]);
     setTimeout(() => {
       setToasts((prev: Array<{ id: string; message: string }>) => prev.filter((t: { id: string; message: string }) => t.id !== id));
-    }, 3000);
+    }, 8000);
   };
 
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -539,7 +539,7 @@ export function DocumentLibrary({
 
         // attempts 提升到 setInterval 外部，确保跨 interval 累计计数
         let attempts = 0;
-        const maxAttempts = 60; // 最多轮询 60 次（3 分钟）
+        const maxAttempts = 25; // 最多轮询 25 次（1 分钟）
 
         const intervalId = window.setInterval(async () => {
           // 超时兜底：无论后端状态如何，超过上限即停止
@@ -586,7 +586,7 @@ export function DocumentLibrary({
               );
             }
           } catch { /* 网络抖动，继续下一次轮询 */ }
-        }, 3000);
+        }, 8000);
 
         pollingIntervalsRef.current.set(result.paper_id, intervalId);
       }

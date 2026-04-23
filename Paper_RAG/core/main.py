@@ -17,7 +17,7 @@ from Paper_RAG.pipeline.pdf_parser import parse_pdf
 from Paper_RAG.pipeline.text_cleaner import clean_markdown
 from Paper_RAG.pipeline.chunk_splitter import split_chunks
 from Paper_RAG.pipeline.embedding import embed_documents_batch, compute_md5
-from Paper_RAG.registry.md5_records import load_md5_records, save_md5_records
+from Paper_RAG.registry.md5_records import load_md5_records, md5_records_upsert
 from Paper_RAG.pipeline.vector_store import get_vector_store, add_chunks_to_vector_store, COLLECTION_NAME
 from Paper_RAG.retrieval.retrieval import get_retriever
 from Paper_RAG.generation.generation import create_generation_chain, _extract_json
@@ -93,7 +93,7 @@ def process_pdf_pipeline(pdf_path: str, file_name: str, should_abort: callable =
             chunk.metadata["source_file"] = file_name
             chunk.metadata["chunk_index"] = i
 
-        # Step 4.5: Save chunks to local file（与旧 batch_processor 格式一致）
+        # Step 4.5: Save chunks to local file
         if should_abort and should_abort():
             raise PipelineAbortedError(f"[{paper_id}] chunks 写入前检测到删除请求，已停止")
         local_dir = os.path.join(DATA_DIR, "papers", paper_id)
@@ -132,12 +132,7 @@ def process_pdf_pipeline(pdf_path: str, file_name: str, should_abort: callable =
         # 必须在 Qdrant 写入成功后立即记录，防止崩溃重跑时重复 upsert
         if should_abort and should_abort():
             raise PipelineAbortedError(f"[{paper_id}] md5_records 写入前检测到删除请求，已停止")
-        records[md5_hash] = {
-            "file_name": file_name,
-            "processed_at": str(__import__("datetime").datetime.now()),
-            "chunk_count": len(chunks)
-        }
-        save_md5_records(records)
+        md5_records_upsert(md5_hash, file_name, len(chunks))
 
         return f"成功处理：{file_name}，生成 {len(chunks)} 个 chunks"
 
@@ -201,15 +196,9 @@ def answer_question(
         return f"回答问题时出错: {str(e)}"
 
 
-def main():
-    """程序入口。"""
-    import tkinter as tk
-    from Paper_RAG.ui import PaperRAGApp
-
-    os.makedirs(DATA_DIR, exist_ok=True)
-    root = tk.Tk()
-    app = PaperRAGApp(root)
-    root.mainloop()
+def _main():
+    """程序入口（CLI模式）。当前系统由 server.py 启动，main() 保留用于调试。"""
+    pass
 
 
 if __name__ == "__main__":

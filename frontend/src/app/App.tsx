@@ -13,14 +13,12 @@ type Tab = "library" | "opinion" | "qa";
 export default function App() {
   const [activeTab, setActiveTab] = useState<Tab>("library");
   const [folderTree, setFolderTree] = useState<FolderNode[]>([]);
-  const [documents, setDocuments] = useState<DocumentRecord[]>([]);
   const [isNavExpanded, setIsNavExpanded] = useState(true);
 
   const loadFolderTree = useCallback(async () => {
     try {
       const data = await fetchDocuments();
       setFolderTree(data.folders);
-      setDocuments(data.documents);
     } catch (e) {
       console.error("App: failed to load folder tree", e);
     }

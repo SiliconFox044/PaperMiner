@@ -261,7 +261,7 @@ class RetrieveResponse(BaseModel):
 
 class AnswerRequest(BaseModel):
     question: str = Field(..., min_length=1, description="问题文本")
-    paper_ids: list[str] = Field(default_factory=list, description="指定检索范围的文档文件名列表")
+    paper_ids: list[str] = Field(default_factory=list, description="指定检索范围的 paper_id 列表（MD5前8位）")
     mode: str = Field(default="qa", description="生成模式：qa=知识问答，opinion=观点搜索引用")
 
 
@@ -365,7 +365,7 @@ async def health_check():
 
 @app.post("/api/retrieve", response_model=RetrieveResponse)
 async def retrieve(request: RetrieveRequest):
-    """观点搜索：向量检索 + Jina rerank + LLM 分析。
+    """观点搜索：向量检索 + SiliconFlow BGE rerank + LLM 分析。
 
     Args:
         request.query: 搜索文本
@@ -437,7 +437,7 @@ async def retrieve(request: RetrieveRequest):
                 analysis = (
                     "⚪ 缺乏支撑\n\n"
                     "目前文献库中缺乏与该论点相似的文献片段。"
-                    "接下来展示的文献片段与原论点相似系数<0.6，仅供参考。"
+                    "接下来展示的文献片段与原论点相似系数<0.7，仅供参考。"
                 )
                 _log("2", "/api/retrieve", request_id, S_NO_QUALITY_DOCS, "done",
                      elapsed_ms=0, analysis_len=len(analysis))
@@ -508,7 +508,7 @@ async def answer(request: AnswerRequest):
 
     Args:
         request.question: 问题文本
-        request.paper_ids: 可选，指定检索范围的文档文件名列表
+        request.paper_ids: 可选，指定检索范围的 paper_id 列表（MD5前8位）
         request.mode: "qa"=知识问答（使用 QA_PROMPT），"opinion"=观点搜索引用（使用 ANALYST_PROMPT）
 
     Returns:
@@ -1200,5 +1200,12 @@ async def retry_document(paper_id: str):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("server:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run(
+        "server:app",
+        host="0.0.0.0",
+        port=8000,
+        reload=True,
+        reload_dirs=["Paper_RAG", "."],
+        reload_excludes=["data/*", "*.json", "*.log"],
+    )
 
