@@ -304,4 +304,5 @@ def delete_paper_vectors(
     # 同时删除新格式和旧格式
     _delete("paper_id")
     _delete("metadata.paper_id")
-    return 0
+    # Qdrant filter-based delete 不返回删除数量，返回 -1 表示无法确定
+    return -1

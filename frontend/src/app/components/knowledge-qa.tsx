@@ -311,7 +311,7 @@ export function KnowledgeQA() {
         <div className="h-12 flex items-center px-4 border-b border-sidebar-border">
           {sidebarOpen && (
             <span className="flex-1 text-lg tracking-wider uppercase font-bold text-gray-500">
-              会话
+              历史会话
             </span>
           )}
           <button

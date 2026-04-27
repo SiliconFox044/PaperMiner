@@ -77,7 +77,7 @@ ANALYST_PROMPT = """# 角色 (Role)
 
 JSON 结构如下：
 {{
-  "answer": "在此字段内，严格按以下 Markdown 结构输出完整分析：\n### 1. 判定结论\n*(从以下四项中选一，保留 emoji)*\n- 🟢 充分支持 / 🟡 部分支持 / 🔴 明确反驳 / ⚪ 缺乏支撑\n\n### 2. 逻辑比对分析\n*(200-300字，解释判定理由)*\n\n### 3. 核心证据提取\n*(逐条列出原文，无则输出'无')*\n- 证据1：'...' (来源：[文件名])",
+  "answer": "在此字段内，严格按以下 Markdown 结构输出完整分析：\n### 1. 判定结论\n*(从以下四项中选一，保留 emoji)*\n- 🟢 充分支持 / 🟡 部分支持 / 🔴 明确反驳 / ⚪ 缺乏支撑\n\n### 2. 逻辑比对分析\n*(先用150字左右概括用户观点的要点，再用400-600字详细分析文献片段能否支持用户观点，以及具体如何支持)*\n\n### 3. 核心证据提取\n*(逐条列出原文，无则输出'无')*\n- 证据1：'...' (来源：[文件名])",
   "sources": [
     {{
       "file": "来源文件名（不含路径）",
@@ -94,7 +94,7 @@ JSON 结构如下：
 
 QA_PROMPT = """# 角色 (Role)
 你是一位严谨的法学文献问答助手。你的唯一知识来源是系统传来的、与用户问题相关的论文片段。
-你的任务是基于这些文献片段，用简洁易懂的语言直接回答用户的问题。
+你的任务是基于这些文献片段，用简明、全面的语言回答用户的问题。
 
 # 铁律约束 (Hard Rules)
 1. 严格禁止使用文献片段以外的任何知识，包括你自身的训练知识。
@@ -118,12 +118,12 @@ QA_PROMPT = """# 角色 (Role)
 
 JSON 结构如下：
 {{
-  "answer": "在此字段内按以下结构回答：**答案如下：**\n以分列要点的形式详细回答用户的问题（200-400字），每个要点单独一行，务必保证逻辑严谨，一切轮带你都要从引用的论文中推理得出，引用原文时标注来源。\n\n**来源文献**\n列出本次回答所依据的文献名称。\n\n如文献库中无相关内容，直接输出：当前文献库中缺乏回答该问题的相关内容。",
+  "answer": "在此字段内按以下结构回答：**答案如下：**\n以分列要点的形式详细回答用户的问题（500字左右），每个要点单独成段，务必保证逻辑严谨，一切轮带你都要从引用的论文中推理得出，引用原文时标注来源。\n\n**来源文献**\n列出本次回答所依据的文献名称。\n\n如文献库中无相关内容，直接输出：当前文献库中缺乏回答该问题的相关内容。",
   "sources": [
     {{
       "file": "来源文件名（不含路径）",
       "path": "章节路径，如无则留空字符串",
-      "excerpt": "支撑回答的原文片段，不超过100字"
+      "excerpt": "支撑回答的原文片段，不超过150字"
     }}
   ]
 }}
@@ -141,7 +141,7 @@ def create_generation_chain():
         raise ValueError("DEEPSEEK_API_KEY environment variable is not set")
 
     llm = ChatOpenAI(
-        model="deepseek-reasoner",
+        model="deepseek-v4-pro",
         api_key=api_key,
         base_url="https://api.deepseek.com",
         temperature=0.3
@@ -170,10 +170,10 @@ def create_qa_chain():
         raise ValueError("DEEPSEEK_API_KEY environment variable is not set")
 
     llm = ChatOpenAI(
-        model="deepseek-reasoner",
+        model="deepseek-v4-pro",
         api_key=api_key,
         base_url="https://api.deepseek.com",
-        temperature=0.2
+        temperature=0.3
     )
 
     prompt = PromptTemplate.from_template(QA_PROMPT)

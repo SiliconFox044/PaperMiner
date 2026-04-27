@@ -6,6 +6,7 @@
 启动命令：python server.py 或 uvicorn server:app --reload --port 8000
 """
 
+import asyncio
 import json
 import logging
 import sys
@@ -156,9 +157,13 @@ async def _boot_log():
             paper["status"] = "failed"
             paper["error_msg"] = "服务重启，任务中断"
             changed = True
+        elif paper.get("status") == "deleting":
+            paper["status"] = "delete_failed"
+            paper["error_msg"] = "服务重启，删除中断"
+            changed = True
     if changed:
         save_registry(registry)
-        logger.info("[startup] 已将孤儿任务（processing）全部标记为 failed")
+        logger.info("[startup] 已将孤儿任务（processing/deleting）全部标记为 failed/delete_failed")
 
 
 # ── 检索历史持久化 ───────────────────────────────────────────────────────────────
@@ -387,99 +392,137 @@ async def retrieve(request: RetrieveRequest):
          elapsed_ms=0, query_len=query_len, top_k=request.top_k, paper_ids_count=paper_ids_count)
 
     try:
-        searcher = get_searcher()
-        used_fallback = False
-
-        # ── 检索阶段 ───────────────────────────────────────────────────────────
+        # ── 在线程池中执行同步检索 + LLM 分析（避免阻塞事件循环）─────────
         _log("2", "/api/retrieve", request_id, S_RETRIEVE_START, "start", elapsed_ms=0)
         t_retrieve = perf_counter()
-        try:
-            docs = searcher.retrieve_and_rerank(
-                request.query,
-                request.paper_ids if request.paper_ids else None,
-                rerank_top_n=request.top_k
-            )
-        except Exception as rerank_err:
-            used_fallback = True
-            fallback_reason = _exc_summary(rerank_err)
-            logger.warning(f"Reranker 失败，降级到纯向量检索: {rerank_err}")
-            docs = searcher.get_retriever().invoke(request.query)
-            docs = docs[:request.top_k]
+
+        def _sync_retrieve_and_analyze():
+            searcher = get_searcher()
+            used_fallback = False
+            fallback_reason = None
+
+            try:
+                docs = searcher.retrieve_and_rerank(
+                    request.query,
+                    request.paper_ids if request.paper_ids else None,
+                    rerank_top_n=request.top_k
+                )
+            except Exception as rerank_err:
+                used_fallback = True
+                fallback_reason = _exc_summary(rerank_err)
+                logger.warning(f"Reranker 失败，降级到纯向量检索: {rerank_err}")
+                docs = searcher.get_retriever().invoke(request.query)
+                if request.paper_ids:
+                    docs = [
+                        doc for doc in docs
+                        if doc.metadata.get("paper_id") in request.paper_ids
+                        or doc.metadata.get("metadata.paper_id") in request.paper_ids
+                    ]
+                docs = docs[:request.top_k]
+
+            # ── 相似度过滤：只取 similarity > 0.7 的片段发给 LLM ─────────
+            if used_fallback:
+                docs_for_llm = docs[:5]
+            else:
+                SIMILARITY_THRESHOLD = 0.7
+                high_quality_docs = [
+                    doc for doc in docs
+                    if doc.metadata.get("relevance_score", 0.0) > SIMILARITY_THRESHOLD
+                ]
+                docs_for_llm = high_quality_docs[:5] if len(high_quality_docs) > 5 else high_quality_docs
+
+            # ── LLM 分析 ─────────────────────────────────────────────────
+            t_llm = perf_counter()
+            if not docs_for_llm:
+                raw_analysis = None
+                llm_status = "no_quality_docs"
+            else:
+                try:
+                    raw_analysis = answer_question(
+                        question=request.query,
+                        pre_retrieved_docs=docs_for_llm
+                    )
+                    if raw_analysis and raw_analysis.strip():
+                        llm_status = "done"
+                    else:
+                        llm_status = "empty"
+                except Exception:
+                    raw_analysis = None
+                    llm_status = "fail"
+            llm_elapsed_ms = (perf_counter() - t_llm) * 1000
+
+            return {
+                "docs": docs,
+                "used_fallback": used_fallback,
+                "fallback_reason": fallback_reason,
+                "docs_for_llm": docs_for_llm,
+                "raw_analysis": raw_analysis,
+                "llm_status": llm_status,
+                "llm_elapsed_ms": llm_elapsed_ms,
+            }
+
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(None, _sync_retrieve_and_analyze)
+
+        docs = result["docs"]
+        used_fallback = result["used_fallback"]
+        fallback_reason = result["fallback_reason"]
+        docs_for_llm = result["docs_for_llm"]
+        raw_analysis = result["raw_analysis"]
+        llm_status = result["llm_status"]
+        llm_elapsed_ms = result["llm_elapsed_ms"]
 
         docs_count = len(docs)
         retrieve_elapsed = (perf_counter() - t_retrieve) * 1000
         _log("2", "/api/retrieve", request_id, S_RETRIEVE_DONE, "done",
              elapsed_ms=retrieve_elapsed, docs_count=docs_count,
-             used_fallback=used_fallback if "used_fallback" in dir() else False,
+             used_fallback=used_fallback,
              fallback_reason=fallback_reason if used_fallback else None)
 
         results = [_doc_to_result_item(doc) for doc in docs[: request.top_k]]
 
-        # ── 相似度过滤：只取 similarity > 0.7 的片段发给 LLM ─────────────────
-        SIMILARITY_THRESHOLD = 0.7
-        high_quality_docs = [
-            doc for doc in docs
-            if doc.metadata.get("relevance_score", 0.0) > SIMILARITY_THRESHOLD
-        ]
-        docs_for_llm = high_quality_docs[:5] if len(high_quality_docs) > 5 else high_quality_docs
-
-        # ── LLM 分析阶段 ───────────────────────────────────────────────────────
+        # ── LLM 响应解析 ────────────────────────────────────────────────────
         _log("2", "/api/retrieve", request_id, S_LLM_ANALYSIS_START, "start", elapsed_ms=0)
         analysis: Optional[str] = None
         analysis_sources: Optional[list[dict]] = None
-        t_llm = perf_counter()
-        raw_analysis = None
-        llm_status = "done"
-        try:
-            if not docs_for_llm:
-                # 无合格片段，返回固定文本
-                llm_status = "no_quality_docs"
-                analysis = (
-                    "⚪ 缺乏支撑\n\n"
-                    "目前文献库中缺乏与该论点相似的文献片段。"
-                    "接下来展示的文献片段与原论点相似系数<0.7，仅供参考。"
-                )
-                _log("2", "/api/retrieve", request_id, S_NO_QUALITY_DOCS, "done",
-                     elapsed_ms=0, analysis_len=len(analysis))
-            else:
-                raw_analysis = answer_question(
-                    question=request.query,
-                    pre_retrieved_docs=docs_for_llm
-                )
-                llm_elapsed = (perf_counter() - t_llm) * 1000
-                if not raw_analysis or not raw_analysis.strip():
-                    llm_status = "empty"
-                    logger.warning("[/api/retrieve] LLM 返回空内容，跳过解析")
-                    _log("2", "/api/retrieve", request_id, S_LLM_ANALYSIS_DONE, "empty",
-                         elapsed_ms=llm_elapsed, analysis_len=0)
-                else:
-                    _log("2", "/api/retrieve", request_id, S_JSON_PARSE_START, "start", elapsed_ms=0)
-                    t_parse = perf_counter()
-                    try:
-                        parsed = json.loads(raw_analysis)
-                        analysis = parsed.get("answer", None)
-                        analysis_sources = parsed.get("sources", None)
-                        parse_elapsed = (perf_counter() - t_parse) * 1000
-                        _log("2", "/api/retrieve", request_id, S_JSON_PARSE_DONE, "done",
-                             elapsed_ms=parse_elapsed,
-                             has_analysis=bool(analysis),
-                             analysis_sources_count=len(analysis_sources) if analysis_sources else 0)
-                        _log("2", "/api/retrieve", request_id, S_LLM_ANALYSIS_DONE, "done",
-                             elapsed_ms=llm_elapsed, analysis_len=len(raw_analysis))
-                    except json.JSONDecodeError as je:
-                        parse_elapsed = (perf_counter() - t_parse) * 1000
-                        llm_status = "parse_fail"
-                        logger.warning(f"[/api/retrieve] LLM 返回非 JSON 结果，跳过解析: {je}")
-                        _log("2", "/api/retrieve", request_id, S_JSON_PARSE_FAIL, "fail",
-                             elapsed_ms=parse_elapsed, error_type="JSONDecodeError",
-                             error_msg=_exc_summary(je))
-        except Exception as e:
-            llm_elapsed = (perf_counter() - t_llm) * 1000
-            llm_status = "fail"
-            logger.warning(f"[/api/retrieve] LLM 分析调用失败，继续返回检索结果: {e}")
+
+        if llm_status == "no_quality_docs":
+            analysis = (
+                "⚪ 缺乏支撑\n\n"
+                "目前文献库中缺乏与该论点相似的文献片段。"
+                "接下来展示的文献片段与原论点相似系数<0.7，仅供参考。"
+            )
+            _log("2", "/api/retrieve", request_id, S_NO_QUALITY_DOCS, "done",
+                 elapsed_ms=0, analysis_len=len(analysis))
+        elif llm_status == "done":
+            _log("2", "/api/retrieve", request_id, S_JSON_PARSE_START, "start", elapsed_ms=0)
+            t_parse = perf_counter()
+            try:
+                parsed = json.loads(raw_analysis)
+                analysis = parsed.get("answer", None)
+                analysis_sources = parsed.get("sources", None)
+                parse_elapsed = (perf_counter() - t_parse) * 1000
+                _log("2", "/api/retrieve", request_id, S_JSON_PARSE_DONE, "done",
+                     elapsed_ms=parse_elapsed,
+                     has_analysis=bool(analysis),
+                     analysis_sources_count=len(analysis_sources) if analysis_sources else 0)
+                _log("2", "/api/retrieve", request_id, S_LLM_ANALYSIS_DONE, "done",
+                     elapsed_ms=llm_elapsed_ms, analysis_len=len(raw_analysis))
+            except json.JSONDecodeError as je:
+                parse_elapsed = (perf_counter() - t_parse) * 1000
+                llm_status = "parse_fail"
+                logger.warning(f"[/api/retrieve] LLM 返回非 JSON 结果，跳过解析: {je}")
+                _log("2", "/api/retrieve", request_id, S_JSON_PARSE_FAIL, "fail",
+                     elapsed_ms=parse_elapsed, error_type="JSONDecodeError",
+                     error_msg=_exc_summary(je))
+        elif llm_status == "empty":
+            logger.warning("[/api/retrieve] LLM 返回空内容，跳过解析")
+            _log("2", "/api/retrieve", request_id, S_LLM_ANALYSIS_DONE, "empty",
+                 elapsed_ms=llm_elapsed_ms, analysis_len=0)
+        else:  # llm_status == "fail"
+            logger.warning("[/api/retrieve] LLM 分析调用失败，继续返回检索结果")
             _log("2", "/api/retrieve", request_id, S_LLM_ANALYSIS_DONE, "fail",
-                 elapsed_ms=llm_elapsed, error_type=type(e).__name__,
-                 error_msg=_exc_summary(e))
+                 elapsed_ms=llm_elapsed_ms)
 
         total_elapsed = (perf_counter() - t0) * 1000
         _log("2", "/api/retrieve", request_id, S_REQUEST_DONE, "done",
@@ -527,39 +570,79 @@ async def answer(request: AnswerRequest):
          elapsed_ms=0, mode=mode, question_len=question_len, paper_ids_count=paper_ids_count)
 
     try:
-        searcher = get_searcher()
-        used_fallback = False
-
-        # ── 检索文档 ────────────────────────────────────────────────────────
+        # ── 在线程池中执行同步检索 + 生成（避免阻塞事件循环）─────────
         _log("3", "/api/answer", request_id, S_RETRIEVE_START, "start", elapsed_ms=0)
         t_retrieve = perf_counter()
-        if not request.paper_ids:
-            try:
-                docs = searcher.retrieve_and_rerank(request.question)
-            except Exception as rerank_err:
-                used_fallback = True
-                fallback_reason = _exc_summary(rerank_err)
-                logger.warning(f"Reranker 失败，降级到纯向量检索: {rerank_err}")
-                docs = searcher.get_retriever().invoke(request.question)
-        else:
-            try:
-                docs = searcher.retrieve_and_rerank(request.question, request.paper_ids)
-            except Exception as rerank_err:
-                used_fallback = True
-                fallback_reason = _exc_summary(rerank_err)
-                logger.warning(f"Reranker 失败，降级到纯向量检索: {rerank_err}")
-                all_docs = searcher.get_retriever().invoke(request.question)
-                docs = [
-                    doc for doc in all_docs
-                    if doc.metadata.get("paper_id") in request.paper_ids
-                    or doc.metadata.get("metadata.paper_id") in request.paper_ids
-                ]
+
+        def _sync_search_and_generate():
+            searcher = get_searcher()
+            used_fallback = False
+            fallback_reason = None
+
+            # ── 检索文档 ──────────────────────────────────────────────
+            if not request.paper_ids:
+                try:
+                    docs = searcher.retrieve_and_rerank(request.question)
+                except Exception as rerank_err:
+                    used_fallback = True
+                    fallback_reason = _exc_summary(rerank_err)
+                    logger.warning(f"Reranker 失败，降级到纯向量检索: {rerank_err}")
+                    docs = searcher.get_retriever().invoke(request.question)
+            else:
+                try:
+                    docs = searcher.retrieve_and_rerank(request.question, request.paper_ids)
+                except Exception as rerank_err:
+                    used_fallback = True
+                    fallback_reason = _exc_summary(rerank_err)
+                    logger.warning(f"Reranker 失败，降级到纯向量检索: {rerank_err}")
+                    all_docs = searcher.get_retriever().invoke(request.question)
+                    docs = [
+                        doc for doc in all_docs
+                        if doc.metadata.get("paper_id") in request.paper_ids
+                        or doc.metadata.get("metadata.paper_id") in request.paper_ids
+                    ]
+
+            if not docs:
+                return {
+                    "docs": [],
+                    "used_fallback": used_fallback,
+                    "fallback_reason": fallback_reason,
+                    "raw_answer": None,
+                    "generate_elapsed_ms": 0,
+                }
+
+            # ── 生成答案 ──────────────────────────────────────────────
+            t_generate = perf_counter()
+            if request.mode == "qa":
+                chain = get_qa_chain()
+                raw_answer = chain.invoke({"documents": docs, "question": request.question})
+            else:
+                raw_answer = answer_question(request.question, pre_retrieved_docs=docs)
+            generate_elapsed_ms = (perf_counter() - t_generate) * 1000
+
+            return {
+                "docs": docs,
+                "used_fallback": used_fallback,
+                "fallback_reason": fallback_reason,
+                "raw_answer": raw_answer,
+                "generate_elapsed_ms": generate_elapsed_ms,
+            }
+
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(None, _sync_search_and_generate)
+
+        docs = result["docs"]
+        used_fallback = result["used_fallback"]
+        fallback_reason = result["fallback_reason"]
+        raw_answer = result["raw_answer"]
+        generate_elapsed_ms = result["generate_elapsed_ms"]
 
         docs_count = len(docs)
         retrieve_elapsed = (perf_counter() - t_retrieve) * 1000
         _log("3", "/api/answer", request_id, S_RETRIEVE_DONE, "done",
              elapsed_ms=retrieve_elapsed, docs_count=docs_count,
-             used_fallback=used_fallback, fallback_reason=fallback_reason if used_fallback else None)
+             used_fallback=used_fallback,
+             fallback_reason=fallback_reason if used_fallback else None)
 
         if not docs:
             total_elapsed = (perf_counter() - t0) * 1000
@@ -572,23 +655,13 @@ async def answer(request: AnswerRequest):
                 sources=[],
             )
 
-        # ── 生成答案 ────────────────────────────────────────────────────────
+        # ── 生成后日志 ────────────────────────────────────────────────────
         generate_stage_start = S_QA_GENERATE_START if request.mode == "qa" else S_OPINION_GENERATE_START
         generate_stage_done = S_QA_GENERATE_DONE if request.mode == "qa" else S_OPINION_GENERATE_DONE
         _log("3", "/api/answer", request_id, generate_stage_start, "start", elapsed_ms=0)
-        t_generate = perf_counter()
-        raw_answer = None
-        if request.mode == "qa":
-            # QA 模式：使用 QA 生成链，不经过 answer_question
-            chain = get_qa_chain()
-            raw_answer = chain.invoke({"documents": docs, "question": request.question})
-        else:
-            # Opinion 模式：使用现有的 answer_question
-            raw_answer = answer_question(request.question, pre_retrieved_docs=docs)
-
-        generate_elapsed = (perf_counter() - t_generate) * 1000
         _log("3", "/api/answer", request_id, generate_stage_done, "done",
-             elapsed_ms=generate_elapsed, raw_answer_len=len(raw_answer) if raw_answer else 0)
+             elapsed_ms=generate_elapsed_ms,
+             raw_answer_len=len(raw_answer) if raw_answer else 0)
 
         # ── 解析 LLM 返回的 JSON ────────────────────────────────────────────
         _log("3", "/api/answer", request_id, S_JSON_PARSE_START, "start", elapsed_ms=0)
@@ -724,17 +797,42 @@ async def upload_pdf(file: UploadFile = File(...)):
         tmp.close()
 
         # 计算 paper_id（MD5 前8位）
-        paper_id = compute_md5(tmp_path)[:8]
+        full_md5 = compute_md5(tmp_path)
+        paper_id = full_md5[:8]
 
         # 持久化源 PDF（独立于流水线，失败重试时使用）
         source_pdf_path = os.path.join("data", "papers", paper_id, "source.pdf")
         os.makedirs(os.path.dirname(source_pdf_path), exist_ok=True)
         shutil.copy2(tmp_path, source_pdf_path)
 
-        # 预注册到 registry
-        from Paper_RAG.registry.paper_registry import load_registry, save_registry
+        # 预注册前检查现有记录
+        from Paper_RAG.registry.paper_registry import load_registry, save_registry, update_paper_status
+        from Paper_RAG.registry.md5_records import load_md5_records
         registry = load_registry()
-        registry["papers"][paper_id] = {
+        papers = registry.get("papers", registry)
+        existing = papers.get(paper_id)
+
+        # 1. completed → 直接返回，不覆盖任何元数据
+        if existing and existing.get("status") == "completed":
+            logger.info(f"[{paper_id}] 文档已完成，跳过重复上传")
+            return UploadResponse(status="completed", paper_id=paper_id)
+
+        # 2. processing → 直接返回，避免并发覆盖
+        if existing and existing.get("status") == "processing":
+            logger.info(f"[{paper_id}] 文档正在处理中，跳过重复上传")
+            return UploadResponse(status="processing", paper_id=paper_id)
+
+        # 3. 兜底：检查 md5_records 是否已完成（registry 可能不同步的极端情况）
+        md5_records = load_md5_records()
+        if full_md5 in md5_records:
+            update_paper_status(paper_id, "completed",
+                chunk_count=md5_records[full_md5].get("chunk_count", 0))
+            logger.info(f"[{paper_id}] md5_records 已存在，同步 registry 为 completed")
+            return UploadResponse(status="completed", paper_id=paper_id)
+
+        # 4. 注册/重新注册（failed/delete_failed 或新文档，保留已有 folder_id）
+        folder_id = existing.get("folder_id", "uncategorized") if existing else "uncategorized"
+        papers[paper_id] = {
             "paper_id": paper_id,
             "original_filename": file.filename,
             "pdf_path": source_pdf_path,
@@ -744,7 +842,7 @@ async def upload_pdf(file: UploadFile = File(...)):
             "registered_at": __import__("datetime").datetime.utcnow().isoformat(),
             "completed_at": None,
             "error_msg": None,
-            "folder_id": "uncategorized",
+            "folder_id": folder_id,
         }
         save_registry(registry)
         logger.info(f"[{paper_id}] 上传已接收，状态=processing，文件={file.filename}，大小={len(content)} bytes")
@@ -753,6 +851,7 @@ async def upload_pdf(file: UploadFile = File(...)):
         def run_pipeline():
             try:
                 from Paper_RAG.core.main import process_pdf_pipeline, PipelineAbortedError
+                from Paper_RAG.registry.md5_records import load_md5_records
                 import re
 
                 logger.info(f"[{paper_id}] 开始异步处理: {file.filename}")
@@ -772,6 +871,17 @@ async def upload_pdf(file: UploadFile = File(...)):
                         return False
                     except Exception:
                         return False
+
+                # 管道启动前二次去重（覆盖两并发上传间 pipeline 末尾写入 md5 的窄窗口）
+                md5_records = load_md5_records()
+                if full_md5 in md5_records:
+                    logger.info(f"[{paper_id}] pipeline 启动时检测到 md5 已存在，跳过处理")
+                    reg = load_registry()
+                    if paper_id in reg.get("papers", reg):
+                        record = md5_records[full_md5]
+                        update_paper_status(paper_id, "completed",
+                            chunk_count=record.get("chunk_count", 0))
+                    return
 
                 result = process_pdf_pipeline(tmp_path, file.filename, should_abort=should_abort)
 

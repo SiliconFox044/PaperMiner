@@ -93,7 +93,7 @@ export function OpinionSearch() {
         timestamp: Date.now(),
       };
       const deduped = [newItem, ...history.filter((h: HistoryItem) => h.query !== newItem.query)].slice(0, 30);
-      persistHistory(deduped);
+      await persistHistory(deduped);
       setCurrentHistoryId(newItem.id);
     } catch (err) {
       setError(err instanceof Error ? err.message : "检索失败，请重试");
@@ -128,9 +128,9 @@ export function OpinionSearch() {
     setTopK(newTopK);
   };
 
-  const handleDeleteHistory = (id: string) => {
+  const handleDeleteHistory = async (id: string) => {
     const newHistory = history.filter((h: HistoryItem) => h.id !== id);
-    persistHistory(newHistory);
+    await persistHistory(newHistory);
     setContextMenu(null);
   };
 
@@ -140,7 +140,7 @@ export function OpinionSearch() {
   };
 
   /** 新建检索：保存当前状态（如有），然后重置工作区 */
-  const handleNewSearch = () => {
+  const handleNewSearch = async () => {
     const hasContent = searchQuery.trim() || results.length > 0;
     if (hasContent) {
       const newItem: HistoryItem = {
@@ -154,7 +154,7 @@ export function OpinionSearch() {
       };
       // 追加到最前，去重（同 query 保留更新的那条），最多 30 条
       const deduped = [newItem, ...history.filter((h: HistoryItem) => h.query !== newItem.query)].slice(0, 30);
-      persistHistory(deduped);
+      await persistHistory(deduped);
     }
     setSearchQuery("");
     setResults([]);
@@ -172,10 +172,10 @@ export function OpinionSearch() {
       <motion.div
         initial={false}
         animate={{ width: isSidebarOpen ? 320 : 64 }}
-        className="h-full border-r border-gray-200/40 flex flex-col overflow-hidden shrink-0 bg-[#eee8d5] z-10 whitespace-nowrap"
+        className="h-full border-r border-sidebar-border flex flex-col overflow-hidden shrink-0 bg-[#eee8d5] z-10 whitespace-nowrap"
       >
         {/* 边栏顶部 */}
-        <div className="h-12 flex items-center px-4 border-b border-gray-200/40 text-gray-400">
+        <div className="h-12 flex items-center px-4 border-b border-sidebar-border text-gray-400">
           <AnimatePresence mode="wait">
             {isSidebarOpen && (
               <motion.div
@@ -218,13 +218,13 @@ export function OpinionSearch() {
                     key={item.id}
                     onClick={() => handleHistoryClick(item)}
                     onContextMenu={(e) => handleContextMenu(e, item.id)}
-                    className={`px-4 py-3 text-[13px] cursor-pointer transition-colors truncate ${
+                    className={`px-4 py-3 text-[13px] cursor-pointer transition-colors ${
                       currentHistoryId === item.id
-                        ? "bg-white text-foreground"
-                        : "text-muted-foreground hover:bg-[#eee8d5] hover:text-foreground"
+                        ? "bg-sidebar-accent text-foreground"
+                        : "text-muted-foreground hover:bg-sidebar-accent hover:text-foreground"
                     }`}
                   >
-                    {item.query}
+                    <span className="truncate block">{item.query}</span>
                   </div>
                 ))
               )}

@@ -71,21 +71,26 @@ function collectReadyFilenames(node: ModalTreeNode): string[] {
   return (node.children || []).flatMap(collectReadyFilenames);
 }
 
-/** 计算文件夹节点的半选/全选状态 */
-function calcChecked(node: ModalTreeNode, selectedIds: Set<string>): boolean | "indeterminate" {
+/** 计算文件夹节点的半选/全选状态（使用递归 map，与 handleToggle 一致） */
+function calcChecked(
+  node: ModalTreeNode,
+  selectedIds: Set<string>,
+  folderToFilesMap: Record<string, Set<string>>
+): boolean | "indeterminate" {
   if (node.type === "file") {
     if (node.status === "processing") return false;
     return selectedIds.has(node.id) ? true : false;
   }
 
-  const readyChildren = (node.children || []).filter(
-    (c) => c.type === "file" && c.status === "ready"
-  );
-  if (readyChildren.length === 0) return false;
+  const readyIds = folderToFilesMap[node.id] || new Set();
+  if (readyIds.size === 0) return false;
 
-  const selectedCount = readyChildren.filter((c) => selectedIds.has(c.id)).length;
+  let selectedCount = 0;
+  readyIds.forEach((id) => {
+    if (selectedIds.has(id)) selectedCount++;
+  });
   if (selectedCount === 0) return false;
-  if (selectedCount === readyChildren.length) return true;
+  if (selectedCount === readyIds.size) return true;
   return "indeterminate";
 }
 
@@ -93,17 +98,19 @@ function ModalTreeNode({
   node,
   selectedIds,
   onToggle,
+  folderToFilesMap,
 }: {
   node: ModalTreeNode;
   selectedIds: Set<string>;
   onToggle: (node: ModalTreeNode) => void;
+  folderToFilesMap: Record<string, Set<string>>;
 }) {
   const [expanded, setExpanded] = useState(false);
 
   const isFolder = node.type === "folder";
   const isProcessing = node.type === "file" && node.status === "processing";
   const checked = isFolder
-    ? calcChecked(node, selectedIds)
+    ? calcChecked(node, selectedIds, folderToFilesMap)
     : isProcessing
     ? false
     : selectedIds.has(node.id);
@@ -159,6 +166,7 @@ function ModalTreeNode({
               node={child}
               selectedIds={selectedIds}
               onToggle={onToggle}
+              folderToFilesMap={folderToFilesMap}
             />
           ))}
         </div>
@@ -318,6 +326,7 @@ export function DocumentSelectionModal({
                 node={node}
                 selectedIds={localSelectedIds}
                 onToggle={handleToggle}
+                folderToFilesMap={folderToFilesMap}
               />
             ))
           )}

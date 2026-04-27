@@ -6,6 +6,7 @@ Paper_RAG/config/.env.*
 data/
 logs/
 
+
 # ===== Python =====
 __pycache__/
 **/__pycache__/

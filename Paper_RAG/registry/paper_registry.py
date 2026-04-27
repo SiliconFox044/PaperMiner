@@ -533,22 +533,19 @@ def delete_single_paper(paper_id: str, registry: dict) -> dict:
 
     # ── 步骤 5：删除本地文件 ────────────────────────────────────────
     local_deleted = False
+    local_ok = True  # 无文件或已删除均视为成功
     if local_dir:
         local_path = DATA_DIR / "papers" / paper_id
         if local_path.exists():
             shutil.rmtree(local_path, ignore_errors=True)
             local_deleted = not local_path.exists()
-        else:
-            local_deleted = False  # 文件夹本来就不存在
+            local_ok = local_deleted  # 删除失败时标记不通过
+        # else: 目录不存在 → local_ok 保持 True
 
     # ── 步骤 5.5：清理 md5_records ─────────────────────────────────────
     md5_ok, md5_msg = remove_md5_by_paper_id(paper_id)
 
-    # ── 步骤 6：更新 registry ───────────────────────────────────────────
-    delete_paper(registry, paper_id)
-    save_registry(registry)
-
-    # ── 步骤 7：构建包含 detail 字符串的结果 ───────────────────────────
+    # ── 步骤 6：构建包含 detail 字符串的结果 ───────────────────────────
     # 判断向量删除结果
     if vectors_before == 0:
         vector_msg = "向量不存在（已跳过）"
@@ -571,18 +568,20 @@ def delete_single_paper(paper_id: str, registry: dict) -> dict:
         local_msg = "无本地文件记录（已跳过）"
     elif local_deleted:
         local_msg = "本地文件已删除"
-    else:
+    elif local_ok:
         local_msg = "本地文件不存在（已跳过）"
+    else:
+        local_msg = "本地文件删除失败"
 
     # 判断整体状态
-    if vector_ok and md5_ok:
+    if vector_ok and md5_ok and local_ok:
         status = "completed"
         prefix = "✓ 完整删除" if vectors_before > 0 else "⚠ 部分成功"
     else:
         status = "partial"
         prefix = "⚠ 部分成功"
 
-    detail = f"{prefix}    {vector_msg}，{local_msg}，{md5_msg}，记录已更新"
+    detail = f"{prefix}    {vector_msg}，{local_msg}，{md5_msg}，记录待更新"
 
     return {
         "status": status,

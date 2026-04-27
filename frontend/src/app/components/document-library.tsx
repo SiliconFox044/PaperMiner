@@ -39,6 +39,7 @@ import {
 } from "./ui/alert-dialog";
 import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuTrigger, ContextMenuSeparator } from "./ui/context-menu";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "./ui/tooltip";
+import { useDocumentTree } from "../context/DocumentTreeContext";
 
 // ─── 类型定义 ─────────────────────────────────────────────────────────────────
 
@@ -465,6 +466,7 @@ export function DocumentLibrary({
   } | null>(null);
 
   // 正在删除中的文档 ID 集合（防止重入删除）
+  const { refresh } = useDocumentTree();
   const [deletingIds, setDeletingIds] = useState<Set<string>>(new Set());
 
   // 根级别新建文件夹
@@ -610,6 +612,7 @@ export function DocumentLibrary({
         // 如果该文件已有轮询在跑（重试场景），先清除
         startPolling(result.paper_id);
       }
+      refresh();
     } catch (err) {
       setUploadStatus(`上传失败：${err instanceof Error ? err.message : "未知错误"}`);
     } finally {
@@ -656,6 +659,7 @@ export function DocumentLibrary({
       // 重新加载以获取更新后的文件夹树和文档列表
       await loadDocuments();
       onFolderTreeChange();
+      refresh();
       // 更新被移动文档的 folder_id
       setAllDocuments((prev) =>
         prev.map((d) =>
@@ -764,6 +768,7 @@ export function DocumentLibrary({
       setAllDocuments((prev) => prev.filter((d) => d.id !== id));
       setDocuments((prev) => prev.filter((d) => d.id !== id));
       onFolderTreeChange();
+      refresh();
     } catch (err) {
       // 失败：标记为 delete_failed，保留条目可见，显示错误
       const msg = err instanceof Error ? err.message : "删除失败";
@@ -826,6 +831,7 @@ export function DocumentLibrary({
       setAllDocuments((prev) => prev.filter((d) => d.id !== paperId));
       setDocuments((prev) => prev.filter((d) => d.id !== paperId));
       onFolderTreeChange();
+      refresh();
     } catch (err) {
       const msg = err instanceof Error ? err.message : "删除失败";
       setAllDocuments((prev) =>
@@ -892,6 +898,7 @@ export function DocumentLibrary({
       }
       setSelectedDocIds(new Set());
       setDraggedDocId(null);
+      refresh();
       return;
     }
 
@@ -916,6 +923,7 @@ export function DocumentLibrary({
       } else {
         setDocuments((prev) => prev.filter((d) => d.id !== docId));
       }
+      refresh();
     } catch (err) {
       setError(err instanceof Error ? err.message : "移动文档失败");
     }
@@ -961,12 +969,15 @@ export function DocumentLibrary({
     <div className="py-2">
       {/* 全部文档选项 */}
       <div
-        className={`flex items-center gap-2 px-4 py-1.5 rounded-md cursor-pointer transition-colors ${
+        className={`flex items-center gap-1 px-2 py-1.5 rounded-md cursor-pointer transition-colors ${
           selectedFolderId === null ? "bg-sidebar-accent" : "hover:bg-sidebar-accent/50"
         }`}
+        style={{ paddingLeft: "8px" }}
         onClick={() => setSelectedFolderId(null)}
       >
-        <div className="w-4" />
+        <div className="p-0.5">
+          <div className="w-4" />
+        </div>
         <Folder className="w-4 h-4 text-muted-foreground" />
         <span className="text-sm">全部文献</span>
       </div>

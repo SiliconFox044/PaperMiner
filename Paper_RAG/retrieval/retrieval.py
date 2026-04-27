@@ -19,6 +19,10 @@ from Paper_RAG.pipeline.vector_store import COLLECTION_NAME, get_qdrant_client, 
 from Paper_RAG.pipeline.embedding import get_embeddings
 from Paper_RAG.utils.progress import progress_log as logger
 
+# ── Rerank API 超时配置 ─────────────────────────────────────────────────────
+_CONNECT_TIMEOUT = float(os.getenv("RERANK_CONNECT_TIMEOUT", "10"))
+_READ_TIMEOUT = float(os.getenv("RERANK_READ_TIMEOUT", "60"))
+
 # ── 日志工具常量 ─────────────────────────────────────────────────────────────
 # 阶段名称常量
 S_RERANK_API = "rerank_api"
@@ -57,7 +61,8 @@ def _siliconflow_rerank(query: str, docs: List[Document], top_n: int) -> List[Do
                 "documents": [doc.page_content for doc in docs],
                 "top_n": top_n,
                 "return_documents": False
-            }
+            },
+            timeout=(_CONNECT_TIMEOUT, _READ_TIMEOUT)
         )
         http_status = response.status_code
         logger(module="retrieval", api="rerank", stage="rerank_api_response", status="done",

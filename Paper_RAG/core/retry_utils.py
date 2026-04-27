@@ -3,7 +3,7 @@
 import logging
 import os
 
-from Paper_RAG.pipeline.vector_store import delete_paper_vectors
+from Paper_RAG.pipeline.vector_store import delete_paper_vectors, count_paper_vectors
 from Paper_RAG.registry.md5_records import remove_md5_by_paper_id
 from Paper_RAG.registry.paper_registry import load_registry, save_registry, update_paper_status
 
@@ -37,6 +37,20 @@ def cleanup_for_retry(paper_id: str) -> dict:
     except Exception as e:
         logger.warning(f"[{paper_id}] Qdrant 清理失败（继续执行）: {e}")
         result["steps"]["qdrant"] = {"ok": False, "msg": str(e)}
+
+    # ── Step 1.5: 验证 Qdrant 向量已清零 ───────────────────────────────────
+    try:
+        remaining = count_paper_vectors(paper_id)
+        if remaining > 0:
+            result["steps"]["qdrant"]["ok"] = False
+            result["steps"]["qdrant"]["msg"] = (
+                f"向量清理不完整：仍有 {remaining} 条残留"
+            )
+            logger.warning(f"[{paper_id}] Qdrant 清理后仍有 {remaining} 条向量残留")
+    except Exception as e:
+        result["steps"]["qdrant"]["ok"] = False
+        result["steps"]["qdrant"]["msg"] = f"向量计数验证失败：{e}"
+        logger.warning(f"[{paper_id}] Qdrant 向量计数验证异常: {e}")
 
     # ── Step 2: 删除派生文件，保留 source.pdf ─────────────────────────────────
     try:
@@ -79,6 +93,9 @@ def cleanup_for_retry(paper_id: str) -> dict:
         logger.warning(f"[{paper_id}] registry 重置失败（继续执行）: {e}")
         result["steps"]["registry"] = {"ok": False, "msg": str(e)}
 
-    # 汇总：只要 registry 重置成功就算基本完成
-    result["success"] = result["steps"].get("registry", {}).get("ok", False)
+    # 汇总：Qdrant / md5 / registry 三项全部成功才算通过
+    qdrant_ok = result["steps"].get("qdrant", {}).get("ok", False)
+    md5_ok = result["steps"].get("md5", {}).get("ok", False)
+    registry_ok = result["steps"].get("registry", {}).get("ok", False)
+    result["success"] = qdrant_ok and md5_ok and registry_ok
     return result
